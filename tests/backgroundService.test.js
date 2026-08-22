@@ -1,0 +1,692 @@
+import { describe, expect, it, vi } from "vitest";
+import { CACHE_TTL_MS, createProfessorLookupService, professorCacheKey } from "../src/backgroundService.js";
+
+describe("background professor lookup service", () => {
+  it("rejects blank professor lookup names before touching RMP or cache", async () => {
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("   ")).rejects.toThrow("professor name is required");
+
+    expect(findProfessorRating).not.toHaveBeenCalled();
+    expect(storage.data).toEqual({});
+  });
+
+  it("reuses persisted Chrome storage cache before calling Rate My Professors", async () => {
+    const cachedRating = {
+      name: "Chee Yap",
+      rating: 2.1,
+      topComments: ["Avoid if you dislike fast lectures."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("YAP, CHEE KENG")]: cachedRating,
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("YAP, CHEE KENG")).resolves.toMatchObject(cachedRating);
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("migrates legacy persisted cache entries to timestamped storage", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const cachedRating = {
+      name: "Chee Yap",
+      rating: 2.1,
+      topComments: ["Legacy cache entry."],
+    };
+    const key = professorCacheKey("YAP, CHEE KENG");
+    const storage = createStorageMock({
+      [key]: cachedRating,
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("YAP, CHEE KENG")).resolves.toEqual({
+      ...cachedRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(storage.data[key]).toEqual({
+      cachedAt: now,
+      value: cachedRating,
+    });
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("returns legacy cached ratings when timestamp migration fails", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const cachedRating = {
+      name: "Chee Yap",
+      rating: 2.1,
+      topComments: ["Legacy cache should still render."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("YAP, CHEE KENG")]: cachedRating,
+    });
+    storage.set = vi.fn(async () => {
+      throw new Error("storage unavailable");
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("YAP, CHEE KENG")).resolves.toEqual({
+      ...cachedRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("normalizes repeated whitespace in professor cache keys", async () => {
+    const cachedRating = {
+      name: "Ada Lovelace",
+      rating: 4.7,
+      topComments: ["Clear explanations."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Ada Lovelace")]: cachedRating,
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("  Ada   Lovelace  ")).resolves.toMatchObject(cachedRating);
+
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("normalizes accents in professor cache keys", async () => {
+    const cachedRating = {
+      name: "Jose Garcia",
+      rating: 4.7,
+      topComments: ["Accented and unaccented cache keys should match."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Jose Garcia")]: cachedRating,
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("Jos\u00e9 Garc\u00eda")).resolves.toMatchObject(cachedRating);
+
+    expect(professorCacheKey("Jos\u00e9 Garc\u00eda")).toBe(professorCacheKey("Jose Garcia"));
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("normalizes punctuation in professor cache keys", async () => {
+    const cachedRating = {
+      name: "Grace B Hopper",
+      rating: 4.8,
+      topComments: ["Punctuation variants should share cache."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Grace B Hopper")]: cachedRating,
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("Grace B. Hopper")).resolves.toMatchObject(cachedRating);
+
+    expect(professorCacheKey("Grace B. Hopper")).toBe(professorCacheKey("Grace B Hopper"));
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("shares cache keys for Albert last-first and normalized professor names", async () => {
+    const cachedRating = {
+      name: "Chee Keng Yap",
+      rating: 2.1,
+      topComments: ["Albert name order should reuse the same cache entry."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Chee Keng Yap")]: cachedRating,
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("YAP, CHEE KENG")).resolves.toMatchObject(cachedRating);
+
+    expect(professorCacheKey("YAP, CHEE KENG")).toBe(professorCacheKey("Chee Keng Yap"));
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("normalizes Albert last-first names before fresh RMP lookups", async () => {
+    const freshRating = {
+      name: "Chee Keng Yap",
+      rating: 2.1,
+      topComments: ["Fresh lookup should use RMP-style name order."],
+    };
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn(async () => freshRating);
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("YAP, CHEE KENG")).resolves.toMatchObject(freshRating);
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Chee Keng Yap");
+    expect(storage.data[professorCacheKey("Chee Keng Yap")]).toMatchObject({
+      value: freshRating,
+    });
+  });
+
+  it("passes CS Albert course context as a department hint for fresh RMP lookups", async () => {
+    const freshRating = {
+      name: "Michael Walfish",
+      rating: 3.5,
+      topComments: ["CS course context should steer last-name lookup."],
+    };
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn(async () => freshRating);
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("Walfish", { courseCode: "CSCI-UA 202" })).resolves.toMatchObject(freshRating);
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Walfish", { departmentHint: "computer-science" });
+    expect(storage.data[professorCacheKey("Walfish", "CSCI-UA 202")]).toMatchObject({
+      value: freshRating,
+    });
+  });
+
+  it("reuses fresh timestamped persisted cache entries", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const cachedRating = {
+      name: "Grace Hopper",
+      rating: 4.8,
+      topComments: ["Useful systems lectures."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Grace Hopper")]: {
+        cachedAt: now - 1000,
+        value: cachedRating,
+      },
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("Grace Hopper")).resolves.toEqual({
+      ...cachedRating,
+      cacheUpdatedAt: now - 1000,
+    });
+    expect(findProfessorRating).not.toHaveBeenCalled();
+  });
+
+  it("returns cache update metadata with professor lookup results", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const cachedRating = {
+      name: "Grace Hopper",
+      rating: 4.8,
+      topComments: ["Useful systems lectures."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Grace Hopper")]: {
+        cachedAt: now - 1000,
+        value: cachedRating,
+      },
+    });
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("Grace Hopper")).resolves.toEqual({
+      ...cachedRating,
+      cacheUpdatedAt: now - 1000,
+    });
+  });
+
+  it("refreshes stale persisted cache entries before returning Albert data", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const staleRating = {
+      name: "Alan Turing",
+      rating: 3.1,
+      topComments: ["Old comment."],
+    };
+    const freshRating = {
+      name: "Alan Turing",
+      rating: 4.6,
+      topComments: ["Fresh useful comment."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Alan Turing")]: {
+        cachedAt: now - CACHE_TTL_MS - 1,
+        value: staleRating,
+      },
+    });
+    const findProfessorRating = vi.fn(async () => freshRating);
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("Alan Turing")).resolves.toEqual({
+      ...freshRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Alan Turing");
+    expect(storage.data[professorCacheKey("Alan Turing")]).toEqual({
+      cachedAt: now,
+      value: freshRating,
+    });
+  });
+
+  it("falls back to stale persisted cache entries when automatic RMP refresh fails", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const staleRating = {
+      name: "Alan Turing",
+      rating: 3.1,
+      topComments: ["Older cached comment shown during RMP outage."],
+    };
+    const cachedAt = now - CACHE_TTL_MS - 1;
+    const storage = createStorageMock({
+      [professorCacheKey("Alan Turing")]: {
+        cachedAt,
+        value: staleRating,
+      },
+    });
+    const findProfessorRating = vi.fn(async () => {
+      throw new Error("Rate My Professors request timed out");
+    });
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("Alan Turing")).resolves.toEqual({
+      ...staleRating,
+      cacheUpdatedAt: cachedAt,
+      cacheStatus: "stale-refresh-failed",
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Alan Turing");
+    expect(storage.data[professorCacheKey("Alan Turing")]).toEqual({
+      cachedAt,
+      value: staleRating,
+    });
+  });
+
+  it("refreshes future-dated persisted cache entries instead of trusting clock-skewed data", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const futureCachedRating = {
+      name: "Alan Turing",
+      rating: 3.1,
+      topComments: ["Future-dated stale comment."],
+    };
+    const freshRating = {
+      name: "Alan Turing",
+      rating: 4.6,
+      topComments: ["Clock-skew refresh comment."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Alan Turing")]: {
+        cachedAt: now + 60_000,
+        value: futureCachedRating,
+      },
+    });
+    const findProfessorRating = vi.fn(async () => freshRating);
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("Alan Turing")).resolves.toEqual({
+      ...freshRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Alan Turing");
+    expect(storage.data[professorCacheKey("Alan Turing")]).toEqual({
+      cachedAt: now,
+      value: freshRating,
+    });
+  });
+
+  it("refreshes stale in-memory cache entries while the service worker stays alive", async () => {
+    let currentTime = new Date("2026-05-24T12:00:00Z").getTime();
+    const firstRating = {
+      name: "Donald Knuth",
+      rating: 3.8,
+      topComments: ["First lookup."],
+    };
+    const refreshedRating = {
+      name: "Donald Knuth",
+      rating: 4.9,
+      topComments: ["Refreshed lookup."],
+    };
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn()
+      .mockResolvedValueOnce(firstRating)
+      .mockResolvedValueOnce(refreshedRating);
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => currentTime,
+    });
+
+    await expect(service.lookup("Donald Knuth")).resolves.toEqual({
+      ...firstRating,
+      cacheUpdatedAt: currentTime,
+    });
+    currentTime += CACHE_TTL_MS + 1;
+    await expect(service.lookup("Donald Knuth")).resolves.toEqual({
+      ...refreshedRating,
+      cacheUpdatedAt: currentTime,
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledTimes(2);
+    expect(storage.data[professorCacheKey("Donald Knuth")]).toEqual({
+      cachedAt: currentTime,
+      value: refreshedRating,
+    });
+  });
+
+  it("deduplicates concurrent lookups for the same professor", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const rating = {
+      name: "Barbara Liskov",
+      rating: 4.8,
+      topComments: ["Precise and rigorous."],
+    };
+    let resolveLookup;
+    const pendingLookup = new Promise((resolve) => {
+      resolveLookup = resolve;
+    });
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn(() => pendingLookup);
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    const first = service.lookup("Barbara Liskov");
+    const second = service.lookup("Barbara Liskov");
+    resolveLookup(rating);
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { ...rating, cacheUpdatedAt: now },
+      { ...rating, cacheUpdatedAt: now },
+    ]);
+
+    expect(findProfessorRating).toHaveBeenCalledTimes(1);
+    expect(storage.data[professorCacheKey("Barbara Liskov")]).toEqual({
+      cachedAt: now,
+      value: rating,
+    });
+  });
+
+  it("does not reuse a normal in-flight lookup for force refresh requests", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const cachedRating = {
+      name: "Ada Lovelace",
+      rating: 4.2,
+      topComments: ["Initial lookup."],
+    };
+    const refreshedRating = {
+      name: "Ada Lovelace",
+      rating: 4.9,
+      topComments: ["Forced refresh lookup."],
+    };
+    const pendingLookups = [];
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn(() => new Promise((resolve) => {
+      pendingLookups.push(resolve);
+    }));
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    const normalLookup = service.lookup("Ada Lovelace");
+    await Promise.resolve();
+    await Promise.resolve();
+    const forcedLookup = service.lookup("Ada Lovelace", { forceRefresh: true });
+    await Promise.resolve();
+    pendingLookups[0](cachedRating);
+    pendingLookups[1](refreshedRating);
+
+    await expect(Promise.all([normalLookup, forcedLookup])).resolves.toEqual([
+      { ...cachedRating, cacheUpdatedAt: now },
+      { ...refreshedRating, cacheUpdatedAt: now },
+    ]);
+
+    expect(findProfessorRating).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an older in-flight lookup overwrite a newer force refresh cache entry", async () => {
+    let currentTime = new Date("2026-05-24T12:00:00Z").getTime();
+    const initialRating = {
+      name: "Ada Lovelace",
+      rating: 3.1,
+      topComments: ["Older lookup result."],
+    };
+    const refreshedRating = {
+      name: "Ada Lovelace",
+      rating: 4.9,
+      topComments: ["Manual refresh result."],
+    };
+    const pendingLookups = [];
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn(() => new Promise((resolve) => {
+      pendingLookups.push(resolve);
+    }));
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => currentTime,
+    });
+
+    const normalLookup = service.lookup("Ada Lovelace");
+    await Promise.resolve();
+    await Promise.resolve();
+    currentTime += 1000;
+    const forcedLookup = service.lookup("Ada Lovelace", { forceRefresh: true });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    pendingLookups[1](refreshedRating);
+    await expect(forcedLookup).resolves.toEqual({
+      ...refreshedRating,
+      cacheUpdatedAt: currentTime,
+    });
+
+    pendingLookups[0](initialRating);
+    await expect(normalLookup).resolves.toEqual({
+      ...initialRating,
+      cacheUpdatedAt: currentTime - 1000,
+    });
+
+    expect(storage.data[professorCacheKey("Ada Lovelace")]).toEqual({
+      cachedAt: currentTime,
+      value: refreshedRating,
+    });
+    await expect(service.lookup("Ada Lovelace")).resolves.toEqual({
+      ...refreshedRating,
+      cacheUpdatedAt: currentTime,
+    });
+  });
+
+  it("persists fresh RMP lookup results for later Albert page scans", async () => {
+    const freshRating = {
+      name: "Ada Lovelace",
+      rating: 4.7,
+      topComments: ["Clear explanations."],
+    };
+    const storage = createStorageMock();
+    const findProfessorRating = vi.fn(async () => freshRating);
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const service = createProfessorLookupService({ storage, findProfessorRating, now: () => now });
+
+    await expect(service.lookup("Ada Lovelace")).resolves.toEqual({
+      ...freshRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Ada Lovelace");
+    expect(storage.data[professorCacheKey("Ada Lovelace")]).toEqual({
+      cachedAt: now,
+      value: freshRating,
+    });
+  });
+
+  it("falls back to RMP lookup when reading persisted cache fails", async () => {
+    const freshRating = {
+      name: "Ada Lovelace",
+      rating: 4.7,
+      topComments: ["Storage read failed, but RMP still worked."],
+    };
+    const storage = createStorageMock();
+    storage.get = vi.fn(async () => {
+      throw new Error("storage unavailable");
+    });
+    const findProfessorRating = vi.fn(async () => freshRating);
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const service = createProfessorLookupService({ storage, findProfessorRating, now: () => now });
+
+    await expect(service.lookup("Ada Lovelace")).resolves.toEqual({
+      ...freshRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Ada Lovelace");
+  });
+
+  it("returns fresh RMP data when persisting the cache entry fails", async () => {
+    const freshRating = {
+      name: "Ada Lovelace",
+      rating: 4.7,
+      topComments: ["Storage failed, but the card can still render."],
+    };
+    const storage = createStorageMock();
+    storage.set = vi.fn(async () => {
+      throw new Error("storage unavailable");
+    });
+    const findProfessorRating = vi.fn(async () => freshRating);
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const service = createProfessorLookupService({ storage, findProfessorRating, now: () => now });
+
+    await expect(service.lookup("Ada Lovelace")).resolves.toEqual({
+      ...freshRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Ada Lovelace");
+  });
+
+  it("clears persisted and in-memory professor cache entries", async () => {
+    const firstRating = {
+      name: "Ada Lovelace",
+      rating: 4.7,
+      topComments: ["Clear explanations."],
+    };
+    const refreshedRating = {
+      name: "Ada Lovelace",
+      rating: 3.2,
+      topComments: ["Newer RMP data."],
+    };
+    const storage = createStorageMock({
+      "professor:grace hopper": { cachedAt: 1, value: { name: "Grace Hopper" } },
+      "settings:theme": "system",
+    });
+    const findProfessorRating = vi.fn()
+      .mockResolvedValueOnce(firstRating)
+      .mockResolvedValueOnce(refreshedRating);
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.lookup("Ada Lovelace")).resolves.toMatchObject(firstRating);
+    await expect(service.clearCache()).resolves.toEqual(2);
+    await expect(service.lookup("Ada Lovelace")).resolves.toMatchObject(refreshedRating);
+
+    expect(storage.data).toEqual({
+      [professorCacheKey("Ada Lovelace")]: expect.objectContaining({ value: refreshedRating }),
+      "settings:theme": "system",
+    });
+    expect(findProfessorRating).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats an empty persisted cache read as nothing to clear", async () => {
+    const storage = createStorageMock();
+    storage.get = vi.fn(async (key) => (key === null ? null : {}));
+    storage.remove = vi.fn(storage.remove);
+    const findProfessorRating = vi.fn();
+    const service = createProfessorLookupService({ storage, findProfessorRating });
+
+    await expect(service.clearCache()).resolves.toEqual(0);
+
+    expect(storage.remove).not.toHaveBeenCalled();
+  });
+
+  it("bypasses fresh cache entries when a force refresh is requested", async () => {
+    const now = new Date("2026-05-24T12:00:00Z").getTime();
+    const cachedRating = {
+      name: "Chee Yap",
+      rating: 2.1,
+      topComments: ["Cached comment."],
+    };
+    const refreshedRating = {
+      name: "Chee Yap",
+      rating: 3.0,
+      topComments: ["Fresh RMP comment."],
+    };
+    const storage = createStorageMock({
+      [professorCacheKey("Chee Yap")]: {
+        cachedAt: now - 1000,
+        value: cachedRating,
+      },
+    });
+    const findProfessorRating = vi.fn(async () => refreshedRating);
+    const service = createProfessorLookupService({
+      storage,
+      findProfessorRating,
+      now: () => now,
+    });
+
+    await expect(service.lookup("Chee Yap", { forceRefresh: true })).resolves.toEqual({
+      ...refreshedRating,
+      cacheUpdatedAt: now,
+    });
+
+    expect(findProfessorRating).toHaveBeenCalledWith("Chee Yap");
+    expect(storage.data[professorCacheKey("Chee Yap")]).toEqual({
+      cachedAt: now,
+      value: refreshedRating,
+    });
+  });
+});
+
+function createStorageMock(initialData = {}) {
+  return {
+    data: { ...initialData },
+    async get(key) {
+      if (key === null) {
+        return { ...this.data };
+      }
+      return { [key]: this.data[key] };
+    },
+    async set(items) {
+      Object.assign(this.data, items);
+    },
+    async remove(keys) {
+      for (const key of keys) {
+        delete this.data[key];
+      }
+    },
+  };
+}

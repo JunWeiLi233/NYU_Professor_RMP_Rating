@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NYU RMP</title>
+    <script type="module" src="./popup.js"></script>
+    <style>
+      :root {
+        --nv: #57068c;
+        --nv-dark: #1a0530;
+        --gold: #b8942c;
+        --warm-bg: #faf8f5;
+        --card-bg: #ffffff;
+        --text: #1f1a2e;
+        --muted: #6b5e7a;
+        --border: #e8e2ef;
+        --good: #1a7a4c;
+        font-family: Aptos, "Segoe UI", sans-serif;
+        color: var(--text);
+      }
+      body {
+        background:
+          radial-gradient(ellipse 80% 60% at 50% -10%, rgba(87,6,140,0.06), transparent),
+          radial-gradient(ellipse 60% 50% at 90% 100%, rgba(184,148,44,0.06), transparent),
+          var(--warm-bg);
+        margin: 0;
+        width: 320px;
+      }
+      main {
+        display: grid;
+        gap: 16px;
+        padding: 20px 18px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .mark {
+        background: linear-gradient(135deg, var(--nv) 0%, var(--nv-dark) 100%);
+        border-radius: 6px;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 800;
+        height: 32px;
+        letter-spacing: -0.3px;
+        line-height: 32px;
+        text-align: center;
+        width: 32px;
+        flex-shrink: 0;
+      }
+      h1 {
+        font-size: 17px;
+        font-weight: 700;
+        letter-spacing: -0.2px;
+        line-height: 1.15;
+        margin: 0;
+      }
+      h1 span {
+        color: var(--nv);
+      }
+      .subtitle {
+        color: var(--muted);
+        font-size: 11.5px;
+        line-height: 1.5;
+        margin: 0;
+        margin-top: 2px;
+      }
+      .panel {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        box-shadow:
+          0 1px 2px rgba(26,5,48,0.04),
+          0 8px 24px rgba(26,5,48,0.07);
+        padding: 15px 14px;
+      }
+      .status {
+        align-items: center;
+        display: flex;
+        gap: 9px;
+      }
+      .notice {
+        background: #f6f4f8;
+        border: 1px solid #ddd6e8;
+        border-radius: 7px;
+        color: #5f5270;
+        font-size: 10.5px;
+        font-weight: 650;
+        line-height: 1.35;
+        margin: 10px 0 0;
+        padding: 7px 8px;
+      }
+      .page-status {
+        background: #fffaf0;
+        border: 1px solid #ead9b1;
+        border-radius: 7px;
+        color: #69521f;
+        font-size: 10.5px;
+        font-weight: 650;
+        line-height: 1.35;
+        margin: 8px 0 0;
+        padding: 7px 8px;
+      }
+      .page-status[data-state="connected"] {
+        background: #f0f8f3;
+        border-color: #cbe6d7;
+        color: #245c3d;
+      }
+      .page-status[data-state="warning"] {
+        background: #fff5f2;
+        border-color: #f0c9bd;
+        color: #89412d;
+      }
+      .build-version {
+        color: #7a6c88;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        line-height: 1.2;
+        margin: 8px 0 0;
+        text-transform: uppercase;
+      }
+      .diagnostic-summary {
+        color: #7a6c88;
+        font-size: 10px;
+        font-weight: 650;
+        line-height: 1.35;
+        margin: 6px 0 0;
+      }
+      .feature-list {
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        display: grid;
+        gap: 6px;
+        font-size: 11px;
+        line-height: 1.35;
+        list-style: none;
+        margin: 12px 0 0;
+        padding: 12px 0 0;
+      }
+      .feature-list li {
+        align-items: start;
+        display: grid;
+        gap: 7px;
+        grid-template-columns: 8px 1fr;
+      }
+      .feature-list li::before {
+        background: var(--nv);
+        border-radius: 2px;
+        content: "";
+        height: 4px;
+        margin-top: 5px;
+        width: 4px;
+      }
+      .dot {
+        background: var(--good);
+        border-radius: 999px;
+        box-shadow: 0 0 0 3px rgba(26,122,76,0.15);
+        flex-shrink: 0;
+        height: 7px;
+        width: 7px;
+        animation: pulse-dot 3s ease-in-out infinite;
+      }
+      @keyframes pulse-dot {
+        0%, 100% { box-shadow: 0 0 0 3px rgba(26,122,76,0.15); }
+        50% { box-shadow: 0 0 0 6px rgba(26,122,76,0.06); }
+      }
+      button {
+        background: var(--nv-dark);
+        border: 0;
+        border-radius: 7px;
+        color: #fff;
+        cursor: pointer;
+        font: 600 11.5px/1 Aptos, "Segoe UI", sans-serif;
+        letter-spacing: 0.2px;
+        margin-top: 12px;
+        padding: 9px 12px;
+        text-transform: uppercase;
+        transition: background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+        width: 100%;
+      }
+      button:hover:not(:disabled) {
+        background: var(--nv);
+        box-shadow: 0 4px 12px rgba(87,6,140,0.2);
+      }
+      button:active:not(:disabled) {
+        transform: translateY(1px);
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.38;
+      }
+      .button-row {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr 1fr;
+        margin-top: 12px;
+      }
+      .button-row button {
+        margin-top: 0;
+      }
+      .secondary-button {
+        background: #f4f1f8;
+        border: 1px solid #ded6ea;
+        color: var(--nv-dark);
+      }
+      .secondary-button:hover:not(:disabled) {
+        background: #ece5f5;
+        box-shadow: 0 4px 12px rgba(87,6,140,0.12);
+      }
+      .toggle-row {
+        align-items: center;
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+      .toggle-row span {
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.1px;
+      }
+      .toggle-copy {
+        display: grid;
+        gap: 3px;
+      }
+      .toggle-helper {
+        color: var(--muted);
+        font-size: 10.5px;
+        font-weight: 500;
+        line-height: 1.35;
+      }
+      .toggle-switch {
+        display: inline-block;
+        height: 22px;
+        position: relative;
+        width: 40px;
+        flex-shrink: 0;
+      }
+      .toggle-switch input {
+        cursor: pointer;
+        height: 100%;
+        opacity: 0;
+        position: absolute;
+        width: 100%;
+        z-index: 1;
+      }
+      .toggle-track {
+        background: #d5cde0;
+        border-radius: 999px;
+        height: 100%;
+        transition: background 200ms ease;
+        width: 100%;
+      }
+      .toggle-track::after {
+        background: #fff;
+        border-radius: 999px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+        content: "";
+        height: 16px;
+        left: 3px;
+        position: absolute;
+        top: 3px;
+        transition: transform 200ms cubic-bezier(0.34,1.56,0.64,1);
+        width: 16px;
+      }
+      .toggle-switch input:checked + .toggle-track {
+        background: var(--nv);
+      }
+      .toggle-switch input:checked + .toggle-track::after {
+        transform: translateX(18px);
+      }
+      .toggle-switch input:focus-visible + .toggle-track {
+        outline: 2px solid var(--gold);
+        outline-offset: 3px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dot,
+        button,
+        .toggle-track,
+        .toggle-track::after {
+          animation: none;
+          transition: none;
+        }
+        button:active:not(:disabled) {
+          transform: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="mark" aria-hidden="true">RMP</div>
+        <div>
+          <h1>Albert <span>Ratings</span></h1>
+          <p class="subtitle">Professor ratings appear beside instructor rows on Albert.</p>
+        </div>
+      </header>
+      <section class="panel">
+        <label class="toggle-row">
+          <span class="toggle-copy">
+            <span>Show ratings on Albert</span>
+            <span class="toggle-helper" id="overlay-helper">Applies to open and future Albert pages.</span>
+          </span>
+          <span class="toggle-switch">
+            <input id="enable-overlay" type="checkbox" role="switch" aria-describedby="overlay-helper" checked />
+            <span class="toggle-track"></span>
+          </span>
+        </label>
+        <div class="status">
+          <span class="dot" aria-hidden="true"></span>
+          <p id="status" role="status" aria-live="polite" aria-atomic="true">Extension ready</p>
+        </div>
+        <p id="page-status" class="page-status" role="status" aria-live="polite" aria-atomic="true" data-state="idle">Checking active Albert page</p>
+        <p id="build-version" class="build-version" aria-label="Extension build version">Build checking</p>
+        <p id="diagnostic-summary" class="diagnostic-summary" aria-label="Privacy-safe Albert diagnostic summary">Diagnostics pending</p>
+        <p class="notice">Refresh Albert after loading or updating the extension.</p>
+        <ul class="feature-list" aria-label="Albert rating overlay features">
+          <li>Rating, difficulty, and take-again metrics</li>
+          <li>Radar fit score and pick recommendation</li>
+          <li>Most useful RMP comments from a 20-rating sample</li>
+          <li>Course-aware matching for Albert surname rows</li>
+          <li>Course comment risk/support highlighting</li>
+        </ul>
+        <div class="button-row">
+          <button id="copy-diagnostics" class="secondary-button" type="button">Copy diagnostics</button>
+          <button id="clear-cache" type="button">Clear cache</button>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

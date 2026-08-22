@@ -1,0 +1,1972 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { findProfessorRating, pickBestTeacher } from "../src/shared/rmpClient.js";
+
+describe("Rate My Professors client", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns the best NYU professor match with useful comments", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0x",
+                    legacyId: 123,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [{ tagName: "Clear grading criteria" }],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Explains low-level systems clearly and gives practical labs.",
+                            class: "CSCI-UA 201",
+                            helpfulRating: 11,
+                            clarityRating: 5,
+                            difficultyRating: 2,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "Lectures move fast, but office hours are excellent.",
+                            helpfulRating: 7,
+                            clarityRating: 4,
+                            difficultyRating: 3,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).resolves.toMatchObject({
+      name: "Ada Lovelace",
+      matchConfidence: "exact",
+      rating: 4.7,
+      difficulty: 2.4,
+      ratingsCount: 38,
+      wouldTakeAgain: 92,
+      topComments: [
+        {
+          text: "Explains low-level systems clearly and gives practical labs.",
+          course: "CSCI-UA 201",
+          helpfulRating: 11,
+          clarityRating: 5,
+          difficultyRating: 2,
+        },
+        {
+          text: "Lectures move fast, but office hours are excellent.",
+          helpfulRating: 7,
+          clarityRating: 4,
+          difficultyRating: 3,
+        },
+      ],
+      url: "https://www.ratemyprofessors.com/professor/123",
+    });
+  });
+
+  it("orders top comments by helpfulness before returning them to Albert", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0y",
+                    legacyId: 456,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Fine lecture, but the review is not very detailed.",
+                            helpfulRating: 1,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "The systems explanations are precise and the labs are fair.",
+                            helpfulRating: 19,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "Office hours make the projects much easier to reason about.",
+                            helpfulRating: 7,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.topComments.map((comment) => comment.text)).toEqual([
+      "The systems explanations are precise and the labs are fair.",
+      "Office hours make the projects much easier to reason about.",
+      "Fine lecture, but the review is not very detailed.",
+    ]);
+    expect(result.topComments.map((comment) => comment.helpfulRating)).toEqual([19, 7, 1]);
+  });
+
+  it("keeps fetched useful comments so Albert can still promote course-specific context", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "three-comments",
+                    legacyId: 456,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        { node: { comment: "Generic but very useful overview.", helpfulRating: 31 } },
+                        { node: { comment: "Another broadly useful comment.", helpfulRating: 24 } },
+                        { node: { comment: "CS201-specific workload context.", class: "CSCI-UA 201", helpfulRating: 8 } },
+                        { node: { comment: "Less useful extra comment.", helpfulRating: 2 } },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.topComments.map((comment) => comment.text)).toEqual([
+      "Generic but very useful overview.",
+      "Another broadly useful comment.",
+      "CS201-specific workload context.",
+      "Less useful extra comment.",
+    ]);
+    expect(result.topComments[2].course).toBe("CSCI-UA 201");
+  });
+
+  it("keeps later fetched useful comments so Albert can promote course-specific context", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "later-course-comment",
+                    legacyId: 456,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        { node: { comment: "Most useful generic comment.", helpfulRating: 50 } },
+                        { node: { comment: "Second generic comment.", helpfulRating: 40 } },
+                        { node: { comment: "Third generic comment.", helpfulRating: 30 } },
+                        { node: { comment: "Fourth generic comment.", helpfulRating: 20 } },
+                        { node: { comment: "Later CS201-specific workload context.", class: "CSCI-UA 201", helpfulRating: 4 } },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.topComments.map((comment) => comment.text)).toEqual([
+      "Most useful generic comment.",
+      "Second generic comment.",
+      "Third generic comment.",
+      "Fourth generic comment.",
+      "Later CS201-specific workload context.",
+    ]);
+    expect(result.topComments[4].course).toBe("CSCI-UA 201");
+  });
+
+  it("decodes HTML entities in useful comments before returning them to Albert", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "entity-comments",
+                    legacyId: 123,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Projects &amp; labs are fair &#39;if&#39; you start early.",
+                            helpfulRating: 11,
+                            clarityRating: 5,
+                            difficultyRating: 2,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.topComments[0].text).toBe("Projects & labs are fair 'if' you start early.");
+  });
+
+  it("decodes smart quote and dash entities in useful comments", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "typography-entities",
+                    legacyId: 321,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Don&rsquo;t skip labs &mdash; they&rsquo;re exam prep.",
+                            helpfulRating: 11,
+                            clarityRating: 5,
+                            difficultyRating: 2,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.topComments[0].text).toBe("Don't skip labs - they're exam prep.");
+  });
+
+  it("decodes ellipsis and mark entities in useful comments", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "mark-entities",
+                    legacyId: 654,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Labs use Linux&reg;&hellip; read the docs&trade;.",
+                            helpfulRating: 11,
+                            clarityRating: 5,
+                            difficultyRating: 2,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.topComments[0].text).toBe("Labs use Linux(R)... read the docs(TM).");
+  });
+
+  it("collapses encoded and multiline comment spacing before returning comments to Albert", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "spaced-comments",
+                    legacyId: 456,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Clear&nbsp;systems\n\nlectures\twith   fair labs.",
+                            helpfulRating: 11,
+                            clarityRating: 5,
+                            difficultyRating: 2,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.topComments[0].text).toBe("Clear systems lectures with fair labs.");
+  });
+
+  it("filters encoded placeholder comments before returning useful comments to Albert", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "encoded-placeholder-comments",
+                    legacyId: 789,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "No&nbsp;comments.",
+                            helpfulRating: 99,
+                            clarityRating: 5,
+                            difficultyRating: 1,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "N&#47;A",
+                            helpfulRating: 88,
+                            clarityRating: 5,
+                            difficultyRating: 1,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "Clear systems lectures with fair labs.",
+                            helpfulRating: 2,
+                            clarityRating: 5,
+                            difficultyRating: 2,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.topComments.map((comment) => comment.text)).toEqual([
+      "Clear systems lectures with fair labs.",
+    ]);
+  });
+
+  it("normalizes negative useful-comment metadata as missing values", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci05",
+                    legacyId: 135,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Helpful comment with unavailable metadata.",
+                            helpfulRating: -1,
+                            clarityRating: -1,
+                            difficultyRating: -1,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.topComments).toEqual([
+      {
+        text: "Helpful comment with unavailable metadata.",
+        helpfulRating: null,
+        clarityRating: null,
+        difficultyRating: null,
+      },
+    ]);
+  });
+
+  it("normalizes out-of-range RMP scale metrics as missing values", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xMg==",
+                    legacyId: 137,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 6.2,
+                    avgDifficulty: 8.4,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Helpful comment with impossible metadata.",
+                            helpfulRating: 4,
+                            clarityRating: 7,
+                            difficultyRating: 8,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.rating).toBeNull();
+    expect(result.difficulty).toBeNull();
+    expect(result.topComments[0].clarityRating).toBeNull();
+    expect(result.topComments[0].difficultyRating).toBeNull();
+  });
+
+  it("normalizes formatted RMP scale metrics", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xMw==",
+                    legacyId: 138,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: "4.8 / 5",
+                    avgDifficulty: "2.3 / 5",
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Formatted metrics should remain useful.",
+                            helpfulRating: 4,
+                            clarityRating: "5 / 5",
+                            difficultyRating: "2 / 5",
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.rating).toBe(4.8);
+    expect(result.difficulty).toBe(2.3);
+    expect(result.topComments[0].clarityRating).toBe(5);
+    expect(result.topComments[0].difficultyRating).toBe(2);
+  });
+
+  it("orders useful comments with malformed helpfulness after valid helpful comments", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xMA==",
+                    legacyId: 136,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Malformed helpfulness should not win sorting.",
+                            helpfulRating: "not available",
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "Most useful systems comment.",
+                            helpfulRating: 12,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "Second most useful systems comment.",
+                            helpfulRating: 8,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.topComments.map((comment) => comment.text)).toEqual([
+      "Most useful systems comment.",
+      "Second most useful systems comment.",
+      "Malformed helpfulness should not win sorting.",
+    ]);
+  });
+
+  it("deduplicates repeated useful comments before returning them to Albert", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xNA==",
+                    legacyId: 248,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "Projects are hard, but lectures are clear.",
+                            helpfulRating: 21,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "  projects are hard, but lectures are clear.  ",
+                            helpfulRating: 18,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "Office hours make the systems projects manageable.",
+                            helpfulRating: 7,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.topComments.map((comment) => comment.text)).toEqual([
+      "Projects are hard, but lectures are clear.",
+      "Office hours make the systems projects manageable.",
+    ]);
+  });
+
+  it("filters placeholder RMP comments before returning useful comments to Albert", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xNQ==",
+                    legacyId: 249,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: {
+                      edges: [
+                        {
+                          node: {
+                            comment: "N/A.",
+                            helpfulRating: 40,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "No comments.",
+                            helpfulRating: 32,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "---",
+                            helpfulRating: 24,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "No comments yet",
+                            helpfulRating: 20,
+                          },
+                        },
+                        {
+                          node: {
+                            comment: "Lectures are clear and the systems projects are fair.",
+                            helpfulRating: 12,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.topComments.map((comment) => comment.text)).toEqual([
+      "Lectures are clear and the systems projects are fair.",
+    ]);
+  });
+
+  it("keeps missing RMP numeric fields as null instead of fake zeroes", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0z",
+                    legacyId: 789,
+                    firstName: "Edsger",
+                    lastName: "Dijkstra",
+                    department: "Computer Science",
+                    avgRating: null,
+                    avgDifficulty: null,
+                    numRatings: 3,
+                    wouldTakeAgainPercent: null,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Edsger Dijkstra", { fetchImpl });
+
+    expect(result.rating).toBeNull();
+    expect(result.difficulty).toBeNull();
+    expect(result.wouldTakeAgain).toBeNull();
+  });
+
+  it("treats negative unavailable RMP metrics as missing values", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci03",
+                    legacyId: 890,
+                    firstName: "Alan",
+                    lastName: "Turing",
+                    department: "Computer Science",
+                    avgRating: -1,
+                    avgDifficulty: -1,
+                    numRatings: 0,
+                    wouldTakeAgainPercent: -1,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Alan Turing", { fetchImpl });
+
+    expect(result.rating).toBeNull();
+    expect(result.difficulty).toBeNull();
+    expect(result.wouldTakeAgain).toBeNull();
+  });
+
+  it("treats impossible RMP take-again percentages as missing values", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xMQ==",
+                    legacyId: 891,
+                    firstName: "Alan",
+                    lastName: "Turing",
+                    department: "Computer Science",
+                    avgRating: 4.6,
+                    avgDifficulty: 2.7,
+                    numRatings: 20,
+                    wouldTakeAgainPercent: 125,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Alan Turing", { fetchImpl });
+
+    expect(result.wouldTakeAgain).toBeNull();
+  });
+
+  it("normalizes formatted RMP take-again percentages", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xMg==",
+                    legacyId: 892,
+                    firstName: "Alan",
+                    lastName: "Turing",
+                    department: "Computer Science",
+                    avgRating: 4.6,
+                    avgDifficulty: 2.7,
+                    numRatings: 20,
+                    wouldTakeAgainPercent: "82%",
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Alan Turing", { fetchImpl });
+
+    expect(result.wouldTakeAgain).toBe(82);
+  });
+
+  it("keeps invalid RMP rating counts as zero instead of NaN", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci02",
+                    legacyId: 987,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: "not available",
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.ratingsCount).toBe(0);
+  });
+
+  it("normalizes comma-formatted RMP rating counts", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci02Yg==",
+                    legacyId: 988,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: "1,234",
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.ratingsCount).toBe(1234);
+  });
+
+  it("normalizes labeled comma-formatted RMP rating counts", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci02Yw==",
+                    legacyId: 989,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: "1,234 ratings",
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.ratingsCount).toBe(1234);
+  });
+
+  it("normalizes abbreviated RMP rating counts", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci02ZA==",
+                    legacyId: 990,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: "1.2k ratings",
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.ratingsCount).toBe(1200);
+  });
+
+  it("keeps negative RMP rating counts as zero instead of showing impossible counts", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci04",
+                    legacyId: 246,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: -1,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.ratingsCount).toBe(0);
+  });
+
+  it("normalizes fractional RMP rating counts to whole counts", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xMw==",
+                    legacyId: 247,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 12.8,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    expect(result.ratingsCount).toBe(12);
+  });
+
+  it("ignores null RMP teacher edges in partial GraphQL results", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                null,
+                { node: null },
+                {
+                  node: {
+                    id: "VGVhY2hlci00",
+                    legacyId: 321,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).resolves.toMatchObject({
+      name: "Ada Lovelace",
+      rating: 4.7,
+    });
+  });
+
+  it("treats non-array RMP teacher search edges as no matches", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: { node: { firstName: "Ada", lastName: "Lovelace" } },
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).resolves.toBeNull();
+  });
+
+  it("ignores null RMP teacher rating tags in partial GraphQL results", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci01",
+                    legacyId: 654,
+                    firstName: "Grace",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [
+                      null,
+                      { tagName: "" },
+                      { tagName: "   " },
+                      { tagName: " Clear grading criteria " },
+                    ],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Grace Hopper", { fetchImpl })).resolves.toMatchObject({
+      name: "Grace Hopper",
+      tags: ["Clear grading criteria"],
+    });
+  });
+
+  it("keeps professor ratings when RMP returns non-array comment or tag collections", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "VGVhY2hlci0xNQ==",
+                    legacyId: 249,
+                    firstName: "Ada",
+                    lastName: "Lovelace",
+                    department: "Computer Science",
+                    avgRating: 4.7,
+                    avgDifficulty: 2.4,
+                    numRatings: 38,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: { tagName: "Clear grading criteria" },
+                    ratings: { edges: { node: { comment: "Malformed edge shape." } } },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).resolves.toMatchObject({
+      name: "Ada Lovelace",
+      rating: 4.7,
+      tags: [],
+      topComments: [],
+    });
+  });
+
+  it("requests enough RMP ratings to choose useful comments from a deeper sample", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [],
+            },
+          },
+        },
+      }),
+    }));
+
+    await findProfessorRating("Ada Lovelace", { fetchImpl });
+
+    const requestBody = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(requestBody.query).toContain("ratings(first: 20)");
+  });
+
+  it("treats RMP GraphQL errors as lookup failures instead of empty results", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        errors: [{ message: "RMP search is temporarily unavailable" }],
+        data: null,
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).rejects.toThrow(
+      "Rate My Professors request failed: RMP search is temporarily unavailable",
+    );
+  });
+
+  it("wraps malformed RMP JSON responses as request failures", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON");
+      },
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).rejects.toThrow(
+      "Rate My Professors response was not valid JSON",
+    );
+  });
+
+  it("aborts RMP requests that exceed the lookup timeout", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((_url, options) => {
+      if (!options?.signal) {
+        return Promise.reject(new Error("missing abort signal"));
+      }
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      });
+    });
+
+    const lookup = findProfessorRating("Ada Lovelace", { fetchImpl, timeoutMs: 10 });
+    const assertion = expect(lookup).rejects.toThrow("Rate My Professors request timed out");
+    await vi.advanceTimersByTimeAsync(10);
+
+    await assertion;
+    expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
+  it("matches Albert names with middle names to RMP first-last names", () => {
+    const bestMatch = pickBestTeacher("Chee Keng Yap", [
+      {
+        firstName: "Keng",
+        lastName: "Chee",
+        department: "Mathematics",
+        numRatings: 200,
+      },
+      {
+        firstName: "Chee",
+        lastName: "Yap",
+        department: "Computer Science",
+        numRatings: 92,
+      },
+    ]);
+
+    expect(`${bestMatch.firstName} ${bestMatch.lastName}`).toBe("Chee Yap");
+  });
+
+  it("matches unaccented Albert names to accented RMP professor names", () => {
+    const bestMatch = pickBestTeacher("Jose Garcia", [
+      {
+        firstName: "Joseph",
+        lastName: "Garcia",
+        department: "Computer Science",
+        numRatings: 20,
+      },
+      {
+        firstName: "José",
+        lastName: "García",
+        department: "Computer Science",
+        numRatings: 4,
+      },
+    ]);
+
+    expect(`${bestMatch.firstName} ${bestMatch.lastName}`).toBe("José García");
+  });
+
+  it("prefers abbreviated computer science departments for same-name RMP matches", () => {
+    const bestMatch = pickBestTeacher("Ada Lovelace", [
+      {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        department: "Mathematics",
+        numRatings: 900,
+      },
+      {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        department: "Comp Sci",
+        numRatings: 0,
+      },
+    ]);
+
+    expect(bestMatch.department).toBe("Comp Sci");
+  });
+
+  it("prefers shortened computer science departments for same-name RMP matches", () => {
+    const bestMatch = pickBestTeacher("Ada Lovelace", [
+      {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        department: "Mathematics",
+        numRatings: 900,
+      },
+      {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        department: "Comp Science",
+        numRatings: 0,
+      },
+    ]);
+
+    expect(bestMatch.department).toBe("Comp Science");
+  });
+
+  it("prefers dotted CS departments for same-name RMP matches", () => {
+    const bestMatch = pickBestTeacher("Ada Lovelace", [
+      {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        department: "Mathematics",
+        numRatings: 900,
+      },
+      {
+        firstName: "Ada",
+        lastName: "Lovelace",
+        department: "C.S.",
+        numRatings: 0,
+      },
+    ]);
+
+    expect(bestMatch.department).toBe("C.S.");
+  });
+
+  it("falls back to first-last RMP search when a full Albert middle-name search is weak", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: {
+            newSearch: {
+              teachers: {
+                edges: [
+                  {
+                    node: {
+                      id: "wrong",
+                      legacyId: 1,
+                      firstName: "Keng",
+                      lastName: "Deng",
+                      department: "Mathematics",
+                      avgRating: 3.5,
+                      avgDifficulty: 3.2,
+                      numRatings: 28,
+                      wouldTakeAgainPercent: 60,
+                      teacherRatingTags: [],
+                      ratings: { edges: [] },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: {
+            newSearch: {
+              teachers: {
+                edges: [
+                  {
+                    node: {
+                      id: "right",
+                      legacyId: 419998,
+                      firstName: "Chee",
+                      lastName: "Yap",
+                      department: "Computer Science",
+                      avgRating: 2.1,
+                      avgDifficulty: 4.5,
+                      numRatings: 92,
+                      wouldTakeAgainPercent: 24.2857,
+                      teacherRatingTags: [],
+                      ratings: { edges: [] },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      });
+
+    const result = await findProfessorRating("Chee Keng Yap", { fetchImpl });
+
+    expect(result.name).toBe("Chee Yap");
+    expect(result.matchConfidence).toBe("fuzzy");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body).variables.query.text).toBe("Chee Yap");
+  });
+
+  it("matches RMP professor names that include a middle initial when Albert omits it", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "middle-initial",
+                    legacyId: 222,
+                    firstName: "Grace B.",
+                    lastName: "Hopper",
+                    department: "Computer Science",
+                    avgRating: 4.8,
+                    avgDifficulty: 3.1,
+                    numRatings: 44,
+                    wouldTakeAgainPercent: 96,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Grace Hopper", { fetchImpl });
+
+    expect(result.name).toBe("Grace B. Hopper");
+    expect(result.matchConfidence).toBe("fuzzy");
+  });
+
+  it("matches RMP professor names that include a full middle name when Albert omits it", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "middle-name",
+                    legacyId: 333,
+                    firstName: "Chee Keng",
+                    lastName: "Yap",
+                    department: "Computer Science",
+                    avgRating: 2.1,
+                    avgDifficulty: 4.5,
+                    numRatings: 92,
+                    wouldTakeAgainPercent: 24.2857,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Chee Yap", { fetchImpl });
+
+    expect(result.name).toBe("Chee Keng Yap");
+    expect(result.matchConfidence).toBe("fuzzy");
+  });
+
+  it("matches RMP professor names that include a suffix when Albert omits it", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "suffix",
+                    legacyId: 444,
+                    firstName: "Robert",
+                    lastName: "Martin Jr.",
+                    department: "Computer Science",
+                    avgRating: 4.2,
+                    avgDifficulty: 3.3,
+                    numRatings: 18,
+                    wouldTakeAgainPercent: 82,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Robert Martin", { fetchImpl });
+
+    expect(result.name).toBe("Robert Martin Jr.");
+    expect(result.matchConfidence).toBe("fuzzy");
+  });
+
+  it("matches Albert first-initial names to full RMP professor names", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "initial-match",
+                    legacyId: 555,
+                    firstName: "John",
+                    lastName: "Smith",
+                    department: "Computer Science",
+                    avgRating: 4.2,
+                    avgDifficulty: 3.3,
+                    numRatings: 18,
+                    wouldTakeAgainPercent: 82,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("J. Smith", { fetchImpl });
+
+    expect(result.name).toBe("John Smith");
+    expect(result.matchConfidence).toBe("fuzzy");
+  });
+
+  it("matches live Albert last-name-only instructor rows to full RMP professor names", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "wrong-department",
+                    legacyId: 4441,
+                    firstName: "Sam",
+                    lastName: "Walfish",
+                    department: "Mathematics",
+                    avgRating: 4.8,
+                    avgDifficulty: 2.2,
+                    numRatings: 80,
+                    wouldTakeAgainPercent: 92,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+                {
+                  node: {
+                    id: "cs-professor",
+                    legacyId: 4442,
+                    firstName: "Michael",
+                    lastName: "Walfish",
+                    department: "Computer Science",
+                    avgRating: 4.2,
+                    avgDifficulty: 3.8,
+                    numRatings: 18,
+                    wouldTakeAgainPercent: 79,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    const result = await findProfessorRating("Walfish", { fetchImpl });
+
+    expect(result.name).toBe("Michael Walfish");
+    expect(result.matchConfidence).toBe("fuzzy");
+  });
+
+  it("does not accept unrelated department matches for CS last-name-only Albert rows", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "writing-meyers",
+                    legacyId: 2555340,
+                    firstName: "Michelle",
+                    lastName: "Meyers",
+                    department: "Writing",
+                    avgRating: 4.6,
+                    avgDifficulty: 2.5,
+                    numRatings: 29,
+                    wouldTakeAgainPercent: 93,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+                {
+                  node: {
+                    id: "bio-meyers",
+                    legacyId: 2135013,
+                    firstName: "Myrna",
+                    lastName: "Meyers",
+                    department: "Biological Sciences",
+                    avgRating: 0,
+                    avgDifficulty: 0,
+                    numRatings: 0,
+                    wouldTakeAgainPercent: -1,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Meyers", { fetchImpl, departmentHint: "computer-science" })).resolves.toBeNull();
+  });
+
+  it("does not accept an RMP professor whose longer surname only starts with the Albert surname", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "wrong",
+                    legacyId: 123,
+                    firstName: "Ada",
+                    lastName: "Lovelace-Smith",
+                    department: "Computer Science",
+                    avgRating: 4.9,
+                    avgDifficulty: 2.1,
+                    numRatings: 80,
+                    wouldTakeAgainPercent: 98,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).resolves.toBeNull();
+  });
+
+  it("does not accept nameless RMP teacher results", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "nameless",
+                    legacyId: 321,
+                    firstName: null,
+                    lastName: null,
+                    department: "Computer Science",
+                    avgRating: 5,
+                    avgDifficulty: 1,
+                    numRatings: 200,
+                    wouldTakeAgainPercent: 100,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).resolves.toBeNull();
+  });
+
+  it("does not accept abbreviated RMP names as substring-only matches", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [
+                {
+                  node: {
+                    id: "abbreviated",
+                    legacyId: 654,
+                    firstName: "Ada",
+                    lastName: "L",
+                    department: "Computer Science",
+                    avgRating: 5,
+                    avgDifficulty: 1,
+                    numRatings: 120,
+                    wouldTakeAgainPercent: 100,
+                    teacherRatingTags: [],
+                    ratings: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }));
+
+    await expect(findProfessorRating("Ada Lovelace", { fetchImpl })).resolves.toBeNull();
+  });
+
+  it("drops title suffixes before building first-last fallback searches", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [],
+            },
+          },
+        },
+      }),
+    }));
+
+    await findProfessorRating("Robert Martin Jr.", { fetchImpl });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body).variables.query.text).toBe("Robert Martin");
+  });
+
+  it("drops roman suffixes before building fallback searches", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [],
+            },
+          },
+        },
+      }),
+    }));
+
+    await findProfessorRating("Robert Martin III", { fetchImpl });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body).variables.query.text).toBe("Robert Martin");
+  });
+
+  it("drops punctuated roman suffixes before building fallback searches", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [],
+            },
+          },
+        },
+      }),
+    }));
+
+    await findProfessorRating("Robert Martin III.", { fetchImpl });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body).variables.query.text).toBe("Robert Martin");
+  });
+
+  it("retries accented professor searches with folded ASCII names", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: {
+          newSearch: {
+            teachers: {
+              edges: [],
+            },
+          },
+        },
+      }),
+    }));
+
+    await findProfessorRating("Jos\u00e9 Garc\u00eda", { fetchImpl });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body).variables.query.text).toBe("Jos\u00e9 Garc\u00eda");
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body).variables.query.text).toBe("Jose Garcia");
+  });
+});

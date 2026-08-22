@@ -1,0 +1,443 @@
+const RMP_GRAPHQL_URL = "https://www.ratemyprofessors.com/graphql";
+const NYU_SCHOOL_ID = "U2Nob29sLTEzODE=";
+const MIN_ACCEPTABLE_TEACHER_SCORE = 25;
+const MIN_SUBSTRING_NAME_LENGTH = 6;
+const DEFAULT_LOOKUP_TIMEOUT_MS = 8000;
+const NAME_SUFFIXES = new Set(["ii", "ii.", "iii", "iii.", "iv", "iv.", "v", "v.", "jr", "jr.", "sr", "sr."]);
+const PLACEHOLDER_COMMENT_TEXT = new Set(["n/a", "na", "none", "no comment", "no comments", "no comments yet"]);
+
+const PROFESSOR_SEARCH_QUERY = `
+  query NewSearchTeachersQuery($query: TeacherSearchQuery!) {
+    newSearch {
+      teachers(query: $query) {
+        edges {
+          node {
+            id
+            legacyId
+            firstName
+            lastName
+            department
+            avgRating
+            avgDifficulty
+            numRatings
+            wouldTakeAgainPercent
+            teacherRatingTags {
+              tagName
+            }
+            ratings(first: 20) {
+              edges {
+                node {
+                  comment
+                  class
+                  helpfulRating
+                  clarityRating
+                  difficultyRating
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+export async function findProfessorRating(name, options = {}) {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_LOOKUP_TIMEOUT_MS;
+  const departmentHint = normalizeDepartmentHint(options.departmentHint);
+  for (const queryText of searchNameVariants(name)) {
+    const teachers = await searchTeachers(queryText, fetchImpl, timeoutMs);
+    const bestMatch = pickBestTeacher(name, teachers, { departmentHint });
+    if (bestMatch && teacherScore(compactName(name), bestMatch, { departmentHint }) >= MIN_ACCEPTABLE_TEACHER_SCORE) {
+      return toProfessorRating(bestMatch, name);
+    }
+  }
+
+  return null;
+}
+
+async function searchTeachers(name, fetchImpl, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+
+  try {
+    response = await fetchImpl(RMP_GRAPHQL_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        query: PROFESSOR_SEARCH_QUERY,
+        variables: {
+          query: {
+            text: name,
+            schoolID: NYU_SCHOOL_ID,
+            fallback: true,
+          },
+        },
+      }),
+    });
+  } catch (error) {
+    if (error?.name === "AbortError" || controller.signal.aborted) {
+      throw new Error("Rate My Professors request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Rate My Professors request failed with ${response.status}`);
+  }
+
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("Rate My Professors response was not valid JSON");
+  }
+  if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+    const message = payload.errors.map((error) => error?.message).filter(Boolean).join("; ");
+    throw new Error(`Rate My Professors request failed: ${message || "GraphQL error"}`);
+  }
+  return asArray(payload?.data?.newSearch?.teachers?.edges).map((edge) => edge?.node).filter(Boolean);
+}
+
+export function pickBestTeacher(name, teachers, { departmentHint = "" } = {}) {
+  const target = compactName(name);
+  const normalizedDepartmentHint = normalizeDepartmentHint(departmentHint);
+  return teachers
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftScore = teacherScore(target, left, { departmentHint: normalizedDepartmentHint });
+      const rightScore = teacherScore(target, right, { departmentHint: normalizedDepartmentHint });
+      return rightScore - leftScore;
+    })[0] ?? null;
+}
+
+function toProfessorRating(teacher, requestedName) {
+  const name = `${teacher.firstName ?? ""} ${teacher.lastName ?? ""}`.trim();
+  const comments = asArray(teacher?.ratings?.edges)
+    .map((edge) => edge?.node)
+    .filter((rating) => isUsefulCommentText(rating?.comment))
+    .sort((left, right) => commentHelpfulScore(right) - commentHelpfulScore(left))
+    .filter(uniqueCommentText)
+    .map((rating) => {
+      const course = normalizeCourseName(rating.class);
+      return {
+        text: normalizeCommentText(rating.comment),
+        ...(course ? { course } : {}),
+        helpfulRating: nonNegativeNumberOrNull(rating.helpfulRating),
+        clarityRating: rmpScaleNumberOrNull(rating.clarityRating),
+        difficultyRating: rmpScaleNumberOrNull(rating.difficultyRating),
+      };
+    })
+    .filter(Boolean) ?? [];
+
+  return {
+    id: teacher.id,
+    name,
+    matchConfidence: compactName(name) === compactName(requestedName) ? "exact" : "fuzzy",
+    department: teacher.department ?? "",
+    rating: rmpScaleNumberOrNull(teacher.avgRating),
+    difficulty: rmpScaleNumberOrNull(teacher.avgDifficulty),
+    ratingsCount: nonNegativeCount(teacher.numRatings),
+    wouldTakeAgain: percentNumberOrNull(teacher.wouldTakeAgainPercent),
+    tags: asArray(teacher.teacherRatingTags).map((tag) => normalizeTagName(tag?.tagName)).filter(Boolean).slice(0, 3),
+    topComments: comments,
+    url: teacher.legacyId
+      ? `https://www.ratemyprofessors.com/professor/${teacher.legacyId}`
+      : "https://www.ratemyprofessors.com/",
+  };
+}
+
+function teacherScore(target, teacher, { departmentHint = "" } = {}) {
+  const firstName = compactName(teacher.firstName ?? "");
+  const lastName = compactName(teacher.lastName ?? "");
+  const name = compactName(`${teacher.firstName ?? ""} ${teacher.lastName ?? ""}`);
+  const nameWithoutMiddleParts = compactFirstLastWithoutMiddleParts(teacher.firstName, teacher.lastName);
+  const nameWithoutSuffix = compactNameWithoutSuffix(teacher.firstName, teacher.lastName);
+  const initialLastName = compactInitialLastName(teacher.firstName, teacher.lastName);
+  if (!name) {
+    return 0;
+  }
+  let score = 0;
+  if (name === target) {
+    score += 100;
+  }
+  if (nameWithoutSuffix && nameWithoutSuffix === target) {
+    score += 95;
+  }
+  if (nameWithoutMiddleParts && nameWithoutMiddleParts === target) {
+    score += 95;
+  }
+  if (initialLastName && initialLastName === target) {
+    score += 85;
+  }
+  if (isSingleNameTarget(target) && lastName === target) {
+    score += 70;
+  }
+  if (name.length >= MIN_SUBSTRING_NAME_LENGTH && target.includes(name)) {
+    score += 25;
+  }
+  if (firstName && lastName && target.startsWith(firstName) && target.endsWith(lastName)) {
+    score += 90;
+  }
+  if (isComputerScienceDepartment(teacher.department)) {
+    score += 10;
+  }
+  score += departmentHintScore({ target, teacher, departmentHint });
+  score += Math.min(nonNegativeCount(teacher.numRatings), 50) / 10;
+  return score;
+}
+
+function isComputerScienceDepartment(value) {
+  const department = String(value ?? "").toLowerCase();
+  return /computer|courant|\bcs\b|\bc\.?\s*s\.?\b|\bcomp\.?\s+(?:sci\.?|science)\b/.test(department);
+}
+
+function departmentHintScore({ target, teacher, departmentHint }) {
+  if (!departmentHint) {
+    return 0;
+  }
+  if (departmentMatchesHint(teacher.department, departmentHint)) {
+    return 25;
+  }
+  return departmentHint === "computer-science" && isSingleNameTarget(target) ? -60 : 0;
+}
+
+function departmentMatchesHint(department, departmentHint) {
+  if (departmentHint === "computer-science") {
+    return isComputerScienceDepartment(department);
+  }
+  if (departmentHint === "mathematics") {
+    return isMathematicsDepartment(department);
+  }
+  return false;
+}
+
+function isMathematicsDepartment(value) {
+  return /\bmath(?:ematics)?\b/i.test(String(value ?? ""));
+}
+
+function normalizeDepartmentHint(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["computer-science", "cs", "computer science", "courant"].includes(normalized)) {
+    return "computer-science";
+  }
+  if (["mathematics", "math", "maths"].includes(normalized)) {
+    return "mathematics";
+  }
+  return "";
+}
+
+function normalizeTagName(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeCourseName(value) {
+  return typeof value === "string" ? normalizeCommentText(value) : "";
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function commentHelpfulScore(rating) {
+  return nonNegativeNumberOrNull(rating?.helpfulRating) ?? 0;
+}
+
+function isUsefulCommentText(value) {
+  const text = normalizeCommentText(value);
+  const normalized = text.toLowerCase().replace(/[.!?]+$/g, "").trim();
+  return /\p{L}|\p{N}/u.test(text) && !PLACEHOLDER_COMMENT_TEXT.has(normalized);
+}
+
+function uniqueCommentText(rating, _index, ratings) {
+  const key = compactCommentText(rating?.comment);
+  return key && ratings.findIndex((candidate) => compactCommentText(candidate?.comment) === key) === _index;
+}
+
+function compactCommentText(value) {
+  return normalizeCommentText(value).toLowerCase();
+}
+
+function normalizeCommentText(value) {
+  return decodeHtmlEntities(value).trim().replace(/\s+/g, " ");
+}
+
+function decodeHtmlEntities(value) {
+  const namedEntities = {
+    amp: "&",
+    apos: "'",
+    emdash: "-",
+    endash: "-",
+    hellip: "...",
+    gt: ">",
+    lt: "<",
+    mdash: "-",
+    nbsp: " ",
+    ndash: "-",
+    quot: "\"",
+    rdquo: "\"",
+    reg: "(R)",
+    rsquo: "'",
+    ldquo: "\"",
+    lsquo: "'",
+    trade: "(TM)",
+  };
+
+  return String(value ?? "").replace(/&(#\d+|#x[\da-f]+|[a-z]+);/gi, (entity, token) => {
+    const normalized = token.toLowerCase();
+    if (normalized.startsWith("#x")) {
+      return codePointEntity(normalized.slice(2), 16) ?? entity;
+    }
+    if (normalized.startsWith("#")) {
+      return codePointEntity(normalized.slice(1), 10) ?? entity;
+    }
+    return Object.prototype.hasOwnProperty.call(namedEntities, normalized)
+      ? namedEntities[normalized]
+      : entity;
+  });
+}
+
+function codePointEntity(value, radix) {
+  const codePoint = Number.parseInt(value, radix);
+  if (!Number.isFinite(codePoint)) {
+    return null;
+  }
+  try {
+    return String.fromCodePoint(codePoint);
+  } catch {
+    return null;
+  }
+}
+
+function compactFirstLastWithoutMiddleParts(firstName, lastName) {
+  const firstParts = nameParts(firstName);
+  const last = compactName(lastName ?? "");
+  if (firstParts.length < 2 || !last) {
+    return "";
+  }
+
+  const first = firstParts[0];
+  return first ? `${first}${last}` : "";
+}
+
+function compactNameWithoutSuffix(firstName, lastName) {
+  const parts = [...nameParts(firstName), ...nameParts(lastName)];
+  if (parts.length < 3 || !NAME_SUFFIXES.has(parts[parts.length - 1])) {
+    return "";
+  }
+
+  return parts.slice(0, -1).join("");
+}
+
+function compactInitialLastName(firstName, lastName) {
+  const firstParts = nameParts(firstName);
+  const last = compactName(lastName ?? "");
+  if (firstParts.length < 1 || !last) {
+    return "";
+  }
+
+  return `${firstParts[0].charAt(0)}${last}`;
+}
+
+function isSingleNameTarget(target) {
+  return /^[a-z]{2,}$/.test(target);
+}
+
+function nameParts(value) {
+  return foldDiacritics(value)
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter(Boolean);
+}
+
+function compactName(value) {
+  return foldDiacritics(value)
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+}
+
+function foldDiacritics(value) {
+  return String(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function numberOrNull(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const number = Number(normalizeNumericString(stripScaleSuffix(value)));
+  return Number.isFinite(number) ? number : null;
+}
+
+function stripScaleSuffix(value) {
+  return typeof value === "string" ? value.trim().replace(/\s*\/\s*5\s*$/i, "") : value;
+}
+
+function normalizeNumericString(value) {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const trimmed = value.trim().replace(/\s+ratings?$/i, "");
+  const abbreviatedThousands = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*k$/i);
+  if (abbreviatedThousands) {
+    return String(Number(abbreviatedThousands[1]) * 1000);
+  }
+
+  return /^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(trimmed) ? trimmed.replace(/,/g, "") : trimmed;
+}
+
+function nonNegativeNumberOrNull(value) {
+  const number = numberOrNull(value);
+  return number == null || number < 0 ? null : number;
+}
+
+function percentNumberOrNull(value) {
+  const number = nonNegativeNumberOrNull(stripPercentSuffix(value));
+  return number == null || number > 100 ? null : number;
+}
+
+function stripPercentSuffix(value) {
+  return typeof value === "string" ? value.trim().replace(/%$/, "") : value;
+}
+
+function rmpScaleNumberOrNull(value) {
+  const number = nonNegativeNumberOrNull(value);
+  return number == null || number > 5 ? null : number;
+}
+
+function nonNegativeCount(value) {
+  const number = nonNegativeNumberOrNull(value);
+  return number == null ? 0 : Math.floor(number);
+}
+
+function searchNameVariants(name) {
+  const normalized = String(name).trim().replace(/\s+/g, " ");
+  const parts = normalized.split(" ").filter((part) => part && !NAME_SUFFIXES.has(part.toLowerCase()));
+  const variants = [normalized];
+  const folded = foldDiacritics(normalized);
+
+  if (folded && folded !== normalized) {
+    variants.push(folded);
+  }
+
+  const withoutTitleSuffix = parts.join(" ");
+
+  if (withoutTitleSuffix && withoutTitleSuffix !== normalized) {
+    variants.push(withoutTitleSuffix);
+  }
+
+  if (parts.length > 2) {
+    variants.push(`${parts[0]} ${parts[parts.length - 1]}`);
+  }
+
+  return Array.from(new Set(variants));
+}
